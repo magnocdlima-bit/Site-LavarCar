@@ -13,6 +13,9 @@
   <!-- Tailwind CSS via CDN oficial -->
   <script src="https://cdn.tailwindcss.com"></script>
   
+  <!-- Vue 3 para a consulta de previsão do tempo -->
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js" defer></script>
+
   <!-- Configuração das cores e fonte customizadas do Tailwind -->
   <script>
     tailwind.config = {
@@ -351,6 +354,27 @@
         </p>
       </div>
 
+      <!-- CONSULTA DE CLIMA ANTES DO AGENDAMENTO -->
+      <div id="consultaClima" class="bg-brand-card border border-cyan-500/30 rounded-2xl p-6 sm:p-8 mb-6 shadow-lg shadow-cyan-500/10">
+        <h3 class="font-brand text-2xl font-bold uppercase tracking-wide text-white mb-2">Confira o clima antes de agendar</h3>
+        <p class="text-slate-400 text-sm mb-5">Previsão para Boaçu, São Gonçalo (RJ), CEP 24465-100. Escolha o dia e confira a possibilidade de chuva antes de selecionar a mesma data na agenda abaixo.</p>
+        <label for="dataClima" class="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-2">Data desejada</label>
+        <input id="dataClima" type="date" v-model="dataEscolhida" :min="hoje" :max="ultimoDia"
+          class="w-full sm:w-auto bg-slate-900/90 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-cyan-500 text-sm [color-scheme:dark]">
+        <div class="mt-5 min-h-16" role="status" aria-live="polite">
+          <p v-if="carregando" class="text-slate-300 text-sm">Buscando previsão...</p>
+          <p v-else-if="erro" class="text-amber-300 text-sm">{{ erro }} <button type="button" @click="carregarPrevisao" class="underline font-semibold">Tentar novamente</button></p>
+          <div v-else-if="previsao" class="border border-cyan-500/20 rounded-xl bg-cyan-500/5 p-4">
+            <p class="font-brand font-bold text-xl text-brand-cyan">{{ dataFormatada }} · {{ previsao.probabilidade }}% de chance de chuva</p>
+            <p class="text-slate-200 text-sm mt-1">Volume previsto: {{ previsao.volume }} mm · Temperatura: {{ previsao.minima }}°C a {{ previsao.maxima }}°C</p>
+            <p class="text-slate-400 text-xs mt-2">Estimativa para o dia inteiro; não garante o tempo no horário escolhido. A previsão pode mudar.</p>
+          </div>
+          <p v-else-if="dataEscolhida" class="text-amber-300 text-sm">Não há previsão disponível para esta data. Consulte novamente mais perto do agendamento.</p>
+          <p v-else class="text-slate-400 text-sm">Selecione uma data para ver a previsão.</p>
+        </div>
+        <p class="text-slate-500 text-xs mt-3">Dados: <a href="https://open-meteo.com/" target="_blank" rel="noopener noreferrer" class="underline hover:text-brand-cyan">Open-Meteo</a>. A data acima é uma consulta; escolha a mesma data no Calendly para concluir o agendamento.</p>
+      </div>
+
       <!-- WIDGET DO CALENDLY (AGENDA EM TEMPO REAL) -->
       <div class="bg-brand-card border border-slate-800 rounded-2xl overflow-hidden shadow-2xl mb-12">
         <!-- ⚠️ Lembre-se de criar sua conta no Calendly e substituir "SEU-USUARIO/estetica-automotiva" pelo seu link oficial -->
@@ -482,6 +506,86 @@
 
     </div>
   </footer>
+
+  <!-- Consulta diária pela API Open-Meteo, com cache de 30 minutos por navegador. -->
+  <script defer>
+    document.addEventListener('DOMContentLoaded', () => {
+      const { createApp } = Vue;
+      const fuso = 'America/Sao_Paulo';
+      const dataLocal = (data) => {
+        const partes = new Intl.DateTimeFormat('en-US', { timeZone: fuso, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(data);
+        const valor = (tipo) => partes.find(parte => parte.type === tipo).value;
+        return `${valor('year')}-${valor('month')}-${valor('day')}`;
+      };
+      const dataEmDias = (dias) => dataLocal(new Date(Date.now() + dias * 86400000));
+      createApp({
+        data() {
+          return { dataEscolhida: '', hoje: dataEmDias(0), ultimoDia: dataEmDias(15), dias: null, carregando: false, erro: '', requisicao: null };
+        },
+        computed: {
+          previsao() {
+            if (!this.dataEscolhida || !this.dias || this.dataEscolhida < this.hoje || this.dataEscolhida > this.ultimoDia) return null;
+            const indice = this.dias.time.indexOf(this.dataEscolhida);
+            if (indice < 0) return null;
+            const numero = (valor, casas = 0) => Number.isFinite(valor) ? valor.toFixed(casas).replace('.', ',') : '—';
+            return {
+              probabilidade: numero(this.dias.precipitation_probability_max[indice]),
+              volume: numero(this.dias.precipitation_sum[indice], 1),
+              minima: numero(this.dias.temperature_2m_min[indice]),
+              maxima: numero(this.dias.temperature_2m_max[indice])
+            };
+          },
+          dataFormatada() {
+            if (!this.dataEscolhida) return '';
+            const [ano, mes, dia] = this.dataEscolhida.split('-').map(Number);
+            return new Intl.DateTimeFormat('pt-BR', { day: 'numeric', month: 'long', year: 'numeric', timeZone: fuso }).format(new Date(Date.UTC(ano, mes - 1, dia, 12)));
+          }
+        },
+        watch: {
+          dataEscolhida(valor) {
+            this.erro = '';
+            if (valor && valor >= this.hoje && valor <= this.ultimoDia && !this.dias) this.carregarPrevisao();
+          }
+        },
+        methods: {
+          async carregarPrevisao() {
+            if (this.requisicao) return;
+            this.carregando = true;
+            this.erro = '';
+            try {
+              const chave = 'lavacar-previsao-open-meteo-v1';
+              try {
+                const cache = JSON.parse(sessionStorage.getItem(chave));
+                if (cache && cache.criadoEm > Date.now() - 30 * 60 * 1000 && cache.hoje === this.hoje && Array.isArray(cache.dias?.time)) {
+                  this.dias = cache.dias;
+                  return;
+                }
+              } catch (_) { /* Armazenamento pode estar indisponível. */ }
+              const url = new URL('https://api.open-meteo.com/v1/forecast');
+              url.search = new URLSearchParams({
+                latitude: '-22.8184459', longitude: '-43.0482852',
+                daily: 'precipitation_probability_max,precipitation_sum,temperature_2m_min,temperature_2m_max',
+                timezone: fuso, forecast_days: '16'
+              });
+              const respostaPendente = fetch(url);
+              this.requisicao = respostaPendente;
+              const resposta = await respostaPendente;
+              if (!resposta.ok) throw new Error('HTTP ' + resposta.status);
+              const dados = await resposta.json();
+              if (!Array.isArray(dados.daily?.time) || !Array.isArray(dados.daily?.precipitation_probability_max)) throw new Error('Resposta incompleta');
+              this.dias = dados.daily;
+              try { sessionStorage.setItem(chave, JSON.stringify({ criadoEm: Date.now(), hoje: this.hoje, dias: dados.daily })); } catch (_) { /* Continua sem cache. */ }
+            } catch (_) {
+              this.erro = 'Não foi possível consultar o clima agora. Você ainda pode agendar normalmente.';
+            } finally {
+              this.requisicao = null;
+              this.carregando = false;
+            }
+          }
+        }
+      }).mount('#consultaClima');
+    });
+  </script>
 
   <!-- SCRIPT DE INTEGRAÇÃO COM O WHATSAPP -->
   <script>
